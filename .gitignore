@@ -29,12 +29,13 @@ build/
 weights/
 
 # ── Evidence / clips (never commit raw footage) ──────────
-evidence/
-clips/
+/evidence/
+/clips/
 *.mp4.clip
 # EVIDENCE_DIR defaults to ./evidence_clips (.env.example), which the three
 # patterns above do not cover — so a test run left real clips stageable.
 evidence_clips/
+!backend/evidence/
 # Runtime state for docker compose (database + packaged clips).
 data/*
 !data/.gitkeep
