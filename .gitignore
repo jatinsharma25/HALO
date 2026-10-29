@@ -12,6 +12,7 @@ ENV/
 dist/
 build/
 .eggs/
+.pytest_cache/
 
 # ── Environment / Secrets ───────────────────────────────
 .env
