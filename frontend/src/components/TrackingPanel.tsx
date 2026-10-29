@@ -12,7 +12,6 @@ import {
   Loader2,
   Plug,
   Power,
-  RotateCcw,
   Target,
 } from "lucide-react"
 import { trackingApi } from "@/lib/trackingApi"
