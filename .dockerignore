@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.db
+*.pt
+logs/
+evidence/
+node_modules/
+.pytest_cache/
+.git/
+
+# Neither image needs these; they were 7.6 MB of the 8.8 MB build context.
+ratchet/
+images/
+documentations/
+tests/
+data/
+media/
+frontend/dist/
+.github/

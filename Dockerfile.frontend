@@ -1,0 +1,23 @@
+# ── build ────────────────────────────────────────────────────────────────────
+FROM node:20-alpine AS build
+
+WORKDIR /app/frontend
+# Manifests first, so a dependency install is cached across source edits.
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund
+
+COPY frontend/ ./
+
+# Vite inlines env at BUILD time, so this has to be set here rather than in
+# compose. "/api" makes the app same-origin behind nginx; the app's own default
+# (http://127.0.0.1:8000) is for `npm run dev` against a local backend.
+ENV VITE_API_BASE_URL=/api
+RUN npm run build
+
+# ── serve ────────────────────────────────────────────────────────────────────
+FROM nginx:alpine
+
+COPY --from=build /app/frontend/dist /usr/share/nginx/html
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80

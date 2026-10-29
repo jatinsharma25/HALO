@@ -1,0 +1,1363 @@
+================================================================================
+EYESPY — COMPLETE PROJECT REFERENCE
+(Read this once and you should be able to answer almost anything about the
+project: what it is, how it works, why every major choice was made instead
+of the obvious alternative, what it can't do yet, and how to defend it in
+front of a judge panel.)
+================================================================================
+
+
+TABLE OF CONTENTS
+-----------------
+ 1. Elevator pitches (10 sec / 30 sec / 2 min)
+ 2. The problem this exists to solve
+ 3. What EyeSpy is — and explicitly is NOT
+ 4. Full system architecture (data flow, module by module)
+ 5. Complete tech stack, and WHY each piece was chosen over the obvious alternative
+ 6. Every detection feature, in full detail, with exact numbers and the
+    reasoning behind each one
+ 7. Data model & lifecycle (how one event becomes an incident becomes evidence)
+ 8. Security, privacy & evidence-integrity design
+ 9. Roles & access control
+10. Testing & quality assurance
+11. Real bugs found and fixed during development (proof of real testing, not
+    a one-shot demo)
+12. Known limitations & honest shortcomings
+13. Application examples (civilian + defense-adjacent)
+14. Competitive landscape & differentiation
+15. Business model / monetization
+16. Future roadmap
+17. Extensive Q&A bank
+18. Quick-reference cheat sheet (numbers, files, commands, demo credentials)
+
+
+================================================================================
+1. ELEVATOR PITCHES
+================================================================================
+
+10-SECOND VERSION:
+"EyeSpy turns existing CCTV into an intelligent security layer that detects
+real safety and security events in real time, explains every alert in plain
+language, and produces cryptographically tamper-proof evidence — without ever
+identifying who anyone is."
+
+30-SECOND VERSION:
+"Most 'AI CCTV' products either do nothing smart at all, or they do
+facial recognition and biometric tracking, which is a privacy and legal
+minefield. EyeSpy sits in between: it detects behavior — restricted-zone
+entry, loitering, falls, abandoned objects, fire/smoke, crowding, camera
+tampering — using person detection only, never identity. Every alert comes
+with a deterministic, human-readable explanation of exactly which rule fired
+and why, not a black-box confidence number. And every piece of evidence it
+produces is cryptographically signed and logged in a tamper-evident audit
+trail, so it can actually be trusted and used, not just generated."
+
+2-MINUTE VERSION:
+"Security camera footage today is either watched passively by a human who
+loses attention after 20 minutes, or it's run through 'AI analytics' that
+either over-promise with facial recognition and identity tracking, or
+under-deliver with an opaque AI score nobody can explain or trust as
+evidence.
+
+EyeSpy is built around three ideas. First: detect behavior, not identity.
+We run YOLOv8n restricted to the 'person' class only — no face recognition,
+no biometrics, no cross-camera person re-identification, ever. Second:
+every judgment call is deterministic and explainable. Zone rules, loitering
+thresholds, fall/abandoned-object/fire-smoke heuristics, crowd thresholds —
+each one is a fixed, auditable rule, not a model's opinion, and each alert
+reports both an impact score and a confidence score separately, so an
+unreliable heuristic can never masquerade as a certain detection. Third:
+evidence has to survive scrutiny. Every exported clip is dual-signed — HMAC
+for internal proof, Ed25519 for third-party verification — with whole-person
+redaction by default, and every operator action is written into a
+hash-chained audit log that makes tampering after the fact detectable.
+
+It runs on FastAPI, YOLOv8n, and a React dashboard, works with the CCTV
+cameras a building already has, requires no cloud dependency, and never
+takes an autonomous action — every alert goes to a human. It's built to be
+the kind of system a campus, hospital, or government facility could actually
+deploy and defend, not just demo."
+
+
+================================================================================
+2. THE PROBLEM THIS EXISTS TO SOLVE
+================================================================================
+
+- CCTV coverage has grown enormously, but the monitoring model hasn't. Most
+  installations rely on a human operator watching multiple live feeds.
+  Sustained-attention research on exactly this task shows meaningful
+  degradation in detection accuracy after about 20 minutes of continuous
+  monitoring. In practice, most incidents on passively-monitored CCTV are
+  discovered after the fact, as evidence, not caught in real time.
+
+- Where "AI surveillance" has been added, it tends to go to one of two
+  unsatisfying extremes:
+    (a) Vendors sell facial recognition / biometric identification as the
+        headline feature. This creates real privacy, consent, and legal
+        exposure, and is increasingly restricted or banned outright in many
+        jurisdictions (India's DPDP Act, EU GDPR/AI Act, and multiple
+        municipal facial-recognition bans in the US are all pointed the
+        same direction).
+    (b) Or the "AI" is a black-box confidence score with no explanation,
+        which means nobody can tell an operator WHY an alert fired, and the
+        output is useless as defensible evidence in an actual incident
+        review, HR case, or legal proceeding, because nobody can explain
+        how the system arrived at its conclusion.
+
+- There is a real, underserved middle ground: systems that are genuinely
+  useful for real-time situational awareness and produce evidence that can
+  be trusted and explained — without identifying anyone, without deciding
+  anything autonomously, and without being a black box. That's the gap
+  EyeSpy targets.
+
+
+================================================================================
+3. WHAT EYESPY IS — AND EXPLICITLY IS NOT
+================================================================================
+
+IS:
+- A real-time detection layer on top of existing camera infrastructure
+  (webcam, USB CCTV, RTSP IP cameras, or recorded video files).
+- Person-presence and behavior detection: is someone in a zone they
+  shouldn't be, have they been stationary too long, has someone fallen,
+  is an object sitting unattended, is there a fire/smoke-colored region,
+  did someone cross a monitored line, is a crowd forming.
+- Camera self-health monitoring: is a camera actually working, or has it
+  gone offline, frozen, been blacked out/covered, or gone severely blurry.
+- A deterministic scoring and explanation engine — every incident's impact
+  and confidence score, and its plain-English explanation, is computed by
+  fixed code, not a model, and is 100% reproducible from the same inputs.
+- A tamper-evident evidence and audit system — dual-signed clips, redacted
+  by default, and a hash-chained log of every operator action.
+- Strictly human-in-the-loop: every alert is surfaced to an operator for
+  review; nothing in the system takes automatic real-world action.
+
+IS NOT (permanently, by design — not "not yet"):
+- Facial recognition or any biometric identification.
+- Cross-camera person re-identification / identity tracking. Track IDs are
+  anonymous and camera-local only; they mean nothing outside that one
+  camera's current session.
+- An autonomous response system (no auto-locking doors, no auto-dispatch to
+  authorities, no automatic escalation without a human in the loop).
+- A generative-AI or LLM-based decision system anywhere in the detection,
+  scoring, or explanation path. Every explanation is a template filled in
+  from concrete rule inputs — there is no language model deciding anything.
+
+
+================================================================================
+4. FULL SYSTEM ARCHITECTURE
+================================================================================
+
+HIGH-LEVEL DATA FLOW
+---------------------
+
+  Camera (webcam index / RTSP URL / recorded .mp4)
+        |
+        v
+  VideoSource  (one dedicated Python thread per camera, ~30fps read loop)
+        |  - decodes frames, resizes to 1280x720
+        |  - feeds each frame through CameraHealthMonitor
+        |  - auto-reconnects the capture handle on sustained read failure
+        v
+  DetectionPipeline  (one dedicated thread per camera)
+        |  - YOLOv8n inference, filtered to person class (COCO id 0) only
+        |  - CentroidTracker assigns/holds anonymous per-camera track IDs
+        |  - per-person: zone-hit test, after-hours test, loitering timer
+        |  - whole-frame: fall heuristic, abandoned-object heuristic,
+        |    fire/smoke heuristic, line-crossing counter, crowd heuristic
+        |  - draws the annotated overlay frame for the live view
+        |  - writes an Observation row to the DB for every fired event,
+        |    with confidence_score and impact_score computed and stored
+        |    SEPARATELY (this separation is a deliberate design principle,
+        |    not an implementation detail — see Section 6)
+        v
+  Correlator  (backend/incidents/correlator.py)
+        |  - dedups by (camera_id, event_type, 5-minute time bucket) so
+        |    repeated firings of the same rule in the same window become
+        |    ONE incident, not a flood of separate incidents
+        |  - if impact_score >= 0.6, creates or extends an Incident
+        |  - calls the deterministic scoring engine (scoring.py) and
+        |    explanation engine (explain.py) to (re)compute the incident's
+        |    impact_score, confidence_score, and human-readable explanation
+        |    from ALL of its linked observations
+        v
+  Evidence packaging  (on-demand, via API call, not automatic)
+        |  - redacts every detected person in the clip (whole bounding box,
+        |    not just the face — see Section 6 for why)
+        |  - computes SHA-256 of the clip, then:
+        |      * HMAC-SHA256 of that hash, using a service secret
+        |        (proves "this came from us" to anyone holding the secret)
+        |      * Ed25519 signature of that hash, using a private key whose
+        |        public half is published at GET /evidence/public-key
+        |        (proves authenticity to a THIRD PARTY who never had
+        |        access to our service secret — e.g. a court, an auditor)
+        |  - stores both a redacted "public" clip and a role-gated
+        |    unredacted "original" clip
+        v
+  Audit log  (backend/audit/chain.py)
+        |  - every sensitive action (incident acknowledged, evidence
+        |    viewed/exported, zone changed, etc.) is written as a row whose
+        |    hash includes the PREVIOUS row's hash (a hash chain)
+        |  - if any row is edited after the fact, every subsequent hash
+        |    stops matching — tampering becomes mathematically detectable,
+        |    not just "we hope nobody edited the database"
+        v
+  FastAPI REST API  (JWT auth, role-checked on every route)
+        v
+  React dashboard
+        - live camera tiles (MJPEG stream, per-tile Start/Stop for
+          admin/operator, view-only for responder)
+        - incident triage queue with explanation, evidence, and
+          acknowledge/escalate/resolve workflow
+        - governance view: audit log with hash-chain verification, evidence
+          signing public key, SOPs
+        - configuration: cameras, zones (polygon editor), schedules
+        - live push updates over WebSocket (new alert / alert acknowledged)
+          PLUS an 8-second REST poll as a safety net — see Section 5 for why
+          both exist instead of just one
+
+
+WHY TWO THREADS PER CAMERA (VideoSource + DetectionPipeline), NOT ONE?
+------------------------------------------------------------------------
+Reading frames and running detection are different pacing problems: the
+camera keeps delivering frames at its own native rate regardless of how
+long detection takes on the previous one. Splitting them means a slow
+detection pass (heavier when more people are in frame) never blocks frame
+capture, and the live "raw" feed can still update even if the detection
+pipeline briefly falls behind. If they were one thread, a slow detection
+frame would directly stall frame capture, and a stalled capture couldn't be
+told apart from an actual dead camera.
+
+
+================================================================================
+5. COMPLETE TECH STACK — AND WHY EACH PIECE WAS CHOSEN
+================================================================================
+
+BACKEND FRAMEWORK: FastAPI (not Django / Flask)
+------------------------------------------------
+- Native async support matters here: the MJPEG stream endpoint and the
+  WebSocket alert feed are both long-lived connections that need to coexist
+  with normal short request/response API calls without blocking a worker.
+- Automatic request/response validation and OpenAPI docs (GET /docs) via
+  Pydantic models, with no extra library needed — useful both for
+  development speed and for anyone integrating against the API later.
+- Flask would need bolt-on async and API-schema tooling to match this.
+  Django is heavier than needed here — this isn't a content-management or
+  admin-heavy app, it's a fairly small, focused API surface, and Django's
+  batteries (ORM conventions, admin site, templating) aren't the ones this
+  project needed; SQLAlchemy + Alembic already cover the data layer more
+  directly for this use case.
+
+DATABASE: SQLite (with SQLAlchemy so Postgres is a connection-string away)
+------------------------------------------------------------------------
+- Zero setup: one file, no separate DB server to install/run/secure for a
+  demo, a single-site deployment, or a small campus. This matters a lot for
+  something meant to be easy to pilot.
+- Still fully ACID — this is not "a toy database," it's a real relational
+  engine with real transactions and real constraints (CHECK constraints
+  enforce valid event types, status values, score ranges, etc. at the DB
+  level, not just in application code).
+- Because the whole data layer goes through SQLAlchemy's ORM rather than
+  raw SQL, moving to Postgres for a larger, multi-node deployment is
+  changing DATABASE_URL, not rewriting queries. That migration path exists
+  by construction, even though it hasn't been load-tested yet (see
+  Limitations).
+- Why not go straight to Postgres from day one? Because for the actual
+  target of "one building, one small server, a handful to a few dozen
+  cameras," a separate DB server is operational overhead with no benefit —
+  SQLite's single-writer model is not a bottleneck at that scale.
+
+MIGRATIONS: Alembic (not manual schema management or "just recreate the DB")
+------------------------------------------------------------------------
+- SQLite can't ALTER a CHECK constraint in place — the only way to change
+  one is to rebuild the table. Alembic's "batch mode"
+  (`op.batch_alter_table(..., recreate="always")`) does exactly that
+  rebuild safely, preserving existing data, and this project genuinely
+  needed it multiple times (adding new event types as new detection
+  features were built — see migrations 005, 007, 008). Without a real
+  migration tool, every schema change would risk silently losing data or
+  require a manual, error-prone table-rebuild script each time.
+
+DETECTION MODEL: YOLOv8n (not YOLOv5/v8s-m-l, not Faster R-CNN/SSD, not a
+custom-trained model)
+------------------------------------------------------------------------
+- "n" (nano) variant specifically: this system is CPU-inference-first (no
+  GPU assumed), and nano is the size built for that — it trades some
+  accuracy for roughly 3-5x the speed of the "s"/"m" variants on CPU, which
+  is the difference between a usable frame rate and an unusable one on
+  commodity hardware. If GPU deployment becomes standard (see Future
+  Roadmap), a larger variant becomes viable and would be a config change,
+  not an architecture change.
+- YOLO family over two-stage detectors (Faster R-CNN) or SSD: YOLO's
+  single-pass design is simply faster for the same rough accuracy class,
+  and speed is the binding constraint here, not squeezing out the last
+  percent of mAP.
+- A pretrained COCO model, not a custom-trained one: person detection is
+  one of the best-covered, most heavily benchmarked classes in COCO —
+  there's no domain-specific visual category here (like a specific
+  industrial defect) that would justify the cost and risk of training a
+  custom model from scratch. We only ever use ONE of its 80 classes
+  (person, class ID 0) and discard every other prediction.
+
+TRACKING: A custom centroid tracker (not DeepSORT / ByteTrack / StrongSORT)
+------------------------------------------------------------------------
+- The tracker only needs to answer "is this the same person as one frame
+  ago, for THIS camera, right now" — it does not need to survive long
+  occlusions, re-identify someone who left and came back, or produce an
+  identity that means anything outside the current session. That's a
+  deliberately narrow job.
+- DeepSORT/ByteTrack-class trackers add a Kalman filter, a Hungarian-
+  algorithm assignment step, and (for DeepSORT) an appearance-embedding
+  network purely to track more robustly through occlusion and re-identify
+  a track after it's lost — capability this system explicitly does NOT
+  want to have, since a track surviving loss-and-reacquisition starts to
+  edge toward "identity," which conflicts with the anonymous, camera-local-
+  only tracking principle. A simple nearest-centroid match
+  (max 120px jump, drop after 50 missed frames) does the actual job needed
+  — "count/dedupe people currently visible" — with far less code and
+  compute, and with a track ID that's cheap to prove is meaningless outside
+  the moment it's assigned.
+
+CLASSICAL CV HEURISTICS FOR FALL / ABANDONED OBJECT / FIRE-SMOKE
+(not trained classifiers for each)
+------------------------------------------------------------------------
+- Training a reliable "fall detector" or "fire detector" model needs a
+  large, well-labeled, situation-specific video dataset (falls, real fires,
+  from CCTV-realistic angles) that doesn't exist off-the-shelf in the
+  quantity needed for a trustworthy model, and collecting/labeling one is a
+  project on its own.
+- Classical CV (bounding-box aspect-ratio change for falls, background-
+  subtraction + non-overlap-with-person for abandoned objects, HSV color-
+  range + sustained-area for fire/smoke) is fully deterministic, requires
+  zero training data, and — critically — its FAILURE MODES are understandable
+  and explainable ("the box went wide and flat" is something a human can
+  sanity-check; a neural net's internal activation is not). Given that
+  every one of these is explicitly a "flag for human review" feature, not a
+  "trust this automatically" feature, deterministic and explainable beats
+  marginally-more-accurate-but-opaque for this specific use case.
+- The tradeoff is honestly worse raw accuracy than a well-trained model
+  would eventually achieve — which is exactly why their confidence scores
+  are hard-capped low in scoring.py (see Section 6) rather than presented
+  as equally trustworthy to the person-detection signal itself.
+
+FRONTEND FRAMEWORK: React 19 + Vite (not Vue/Angular/Svelte, not Create
+React App/webpack)
+------------------------------------------------------------------------
+- React: largest ecosystem for the specific pieces this UI needed
+  (headless component primitives, data-fetching libraries, table/dialog/
+  tooltip patterns) — for a UI-heavy dashboard (camera grid, incident
+  triage, zone polygon editor, audit log viewer), ecosystem breadth mattered
+  more than any framework-level performance difference.
+- Vite over webpack/CRA: near-instant dev-server start and hot-module-
+  reload, which mattered a lot given how much of this project's iteration
+  was "make a change, immediately look at the live camera feed/dashboard."
+  Create React App is also effectively unmaintained at this point.
+
+STYLING: Tailwind CSS + shadcn/ui (not Bootstrap, not Material UI/Ant Design,
+not hand-rolled CSS-only)
+------------------------------------------------------------------------
+- Tailwind: utility classes plus CSS custom-property design tokens made it
+  straightforward to build a real light/dark theme system (see
+  frontend/src/index.css) without maintaining two parallel stylesheets —
+  the same utility classes just resolve against whichever token set is
+  active.
+- shadcn/ui over Material UI/Ant Design/Chakra: shadcn isn't a component
+  library you install as a black-box dependency — it generates the actual
+  component source into the project (frontend/src/components/ui/), built on
+  unstyled Radix primitives for accessibility (focus trapping, ARIA
+  attributes, keyboard nav) already solved correctly. That means full
+  control to restyle/modify every component (which we did — extending
+  Badge variants for camera-health states, for example) without fighting a
+  library's theming API or being blocked on an upstream release for a
+  small tweak.
+
+DATA FETCHING: React Query (not plain fetch/useEffect, not Redux)
+------------------------------------------------------------------------
+- Handles caching, request de-duplication, background refetching (the
+  8-second polling), and cache invalidation (triggered by WebSocket events)
+  with a fraction of the boilerplate a hand-rolled fetch/useEffect/useState
+  pattern needs, and without needing a global state library (Redux) for
+  what is fundamentally server-state, not client-state.
+
+LIVE UPDATES: WebSocket AND 8-second polling, not just one or the other
+------------------------------------------------------------------------
+- WebSocket alone: fast, but any single dropped/missed message (a brief
+  network blip, a reconnect race) means the UI silently goes stale with no
+  self-correction — nothing else would ever refresh it.
+- Polling alone: correct eventually, but a genuinely new incident could sit
+  unseen for up to 8 seconds, which matters for a security alert.
+- Together: WebSocket gives near-instant push the moment something
+  happens (new alert, alert acknowledged elsewhere), and the poll is a
+  cheap safety net that guarantees the UI is never more than 8 seconds
+  stale even if a push is missed. Belt and suspenders, for a genuinely
+  low cost.
+
+VIDEO STREAMING: MJPEG (not WebRTC, not HLS/DASH)
+------------------------------------------------------------------------
+- MJPEG is just a long-lived HTTP response of concatenated JPEG frames — an
+  `<img src="/stream/id?token=...">` tag is the entire client-side
+  implementation, with browser-native reconnection behavior on drop.
+- WebRTC would add real complexity (signaling, ICE/STUN, SDP negotiation)
+  to solve a problem this project doesn't have — sub-second glass-to-glass
+  latency for two-way video calling. This is one-way, dashboard-side
+  monitoring where ~100-300ms of extra latency is a complete non-issue.
+- HLS/DASH are built for adaptive-bitrate, CDN-distributed video-on-demand
+  or broadcast — solving problems (multi-resolution renditions, edge
+  caching, DVR-style seeking) this single-viewer, single-source, low-
+  camera-count internal tool does not have, at the cost of several seconds
+  of segment-based latency that would actually hurt here.
+
+AUTH: JWT (not server-side sessions)
+------------------------------------------------------------------------
+- Stateless: the API doesn't need a shared session store, which keeps
+  horizontal scaling simple later (any backend instance can validate a
+  token without a shared session backend) and keeps the auth layer simple
+  for a system that may need to run fully air-gapped/on-prem with no
+  external session infrastructure.
+- Role is embedded directly in the token payload and checked on every
+  route via a `require_role(...)` dependency — RBAC enforcement lives at
+  the API layer, not just hidden in what the UI chooses to show.
+
+EVIDENCE SIGNING: HMAC-SHA256 + Ed25519 together (not just one, not a
+blockchain)
+------------------------------------------------------------------------
+- These prove two DIFFERENT things to two DIFFERENT audiences:
+    * HMAC-SHA256 (symmetric, shared service secret) proves "this evidence
+      came from our system" to anyone who holds that secret — i.e., us,
+      internally.
+    * Ed25519 (asymmetric) proves the same thing to a THIRD PARTY who only
+      has the PUBLIC key (published at GET /evidence/public-key) and never
+      had access to the private signing key or the HMAC secret — e.g. a
+      court, an external auditor, another organization. This is the
+      signature that actually matters once a clip leaves the system's own
+      custody.
+- Why not "just" one of them: HMAC alone can't be verified by an outside
+  party without handing them the same secret used to sign everything else
+  (which then lets them forge new "signed" evidence too) — it only proves
+  internal authenticity. Ed25519 alone is more expensive to verify at
+  scale for purely-internal checks where a shared secret is fine and
+  faster.
+- Why not a blockchain: nothing about this problem needs decentralized
+  consensus, multiple untrusted parties agreeing on order, or a
+  distributed ledger. A single organization's evidence chain of custody
+  is served entirely by a straightforward hash chain (see the audit log
+  design below) — a blockchain would add substantial operational
+  complexity and cost for zero corresponding benefit here.
+
+AUDIT LOG: A hash chain (not a blockchain, not "just" timestamped rows)
+------------------------------------------------------------------------
+- Every audit row stores sha256(previous_row_hash + timestamp + action +
+  actor_id + payload). Change or delete any past row and every row after
+  it fails to re-hash correctly — tampering is detectable by simply
+  re-walking the chain (GET /audit/verify), without needing a second
+  system, a blockchain, or write-once storage hardware.
+- Plain timestamped rows with no chaining would let anyone with DB access
+  quietly edit or delete a row with no trace at all — the chain is what
+  turns "we have a log" into "we can prove the log wasn't altered."
+
+CONTAINERIZATION: Docker + docker-compose (with a documented non-Docker path)
+------------------------------------------------------------------------
+- Consistent environment for anyone evaluating/deploying it, without
+  requiring them to have the exact right Python/Node versions installed
+  natively. But a full non-Docker setup path is also documented (see
+  README/CONTRIBUTING), since a from-scratch inspection of the code —
+  which matters in a competition/judging context — is a lot easier without
+  a container layer between the reader and the running system.
+
+TESTING: pytest (backend) — 133 tests
+------------------------------------------------------------------------
+- Standard, minimal-boilerplate choice for a Python backend; pytest's
+  fixture system made it straightforward to spin up an isolated in-memory
+  DB per test and a fresh FastAPI TestClient without hand-rolled setup
+  code repeated in every file.
+
+
+================================================================================
+6. EVERY DETECTION FEATURE, IN FULL DETAIL
+================================================================================
+
+For every heuristic below: it draws an overlay on the annotated frame on
+EVERY evaluation (so an operator watching live always sees what the system
+is "thinking"), but only WRITES an Observation to the database when it
+actually fires — and firing is itself cooldown-gated, so a sustained
+condition doesn't flood the database with duplicate rows every single
+frame.
+
+PERSON DETECTION (foundation for everything else)
+- YOLOv8n, filtered to COCO class 0 (person) only, confidence threshold 0.5.
+  Every other one of YOLO's 80 trainable classes is detected internally by
+  the model but explicitly discarded before anything downstream ever sees
+  it.
+
+ZONE RULES
+- Restricted-zone entry: a person's centroid falls inside a zone polygon
+  marked "restricted" -> immediate high-impact event (impact 0.9 of 1.0).
+- After-hours presence: any tracked person present outside a camera's
+  configured operating schedule -> impact 0.7.
+- Loitering: a person classified as "stationary" (little centroid movement)
+  for longer than a threshold — global default 120 seconds
+  (LOITERING_SECONDS), overridable per-zone via Zone.loitering_threshold_s
+  -> impact 0.5.
+
+FALL / COLLAPSE HEURISTIC
+- Classical geometric heuristic: watches a tracked person's bounding-box
+  aspect ratio over time; a sudden shift from a mostly-upright box to a
+  wide/flat box, sustained, reads as a possible fall.
+- Impact 0.65 (a possible medical emergency justifies a high impact score
+  even though the heuristic itself is uncertain) but confidence is HARD-
+  CAPPED at 55/100 regardless of anything else — this is the "impact and
+  confidence are separate" design principle doing real work: high-impact,
+  low-confidence, by design, so it always reads as "worth an operator's
+  immediate attention, NOT a confirmed medical event."
+- Real limitation, tested directly: needs a mostly front-on, full-body
+  camera view. A close/steep webcam angle that only frames head-and-
+  shoulders will never produce the box-flattening signal this heuristic
+  looks for — this isn't a threshold that needs tuning, it's a genuine
+  requirement of the geometric approach.
+
+ABANDONED-OBJECT HEURISTIC
+- Background-subtraction based: learns a background model of the static
+  scene (needs roughly 300 frames to converge), then flags a static
+  foreground blob that (a) isn't overlapping any currently-tracked person
+  and (b) has persisted past a dwell threshold.
+- Impact 0.35, confidence capped at 50/100.
+- Real limitation, tested directly: if a person stays near the object (the
+  overlap check fails), or the background model hasn't converged yet,
+  it won't fire — this is a real constraint of the technique, not a bug.
+
+FIRE/SMOKE HEURISTIC
+- HSV color-range analysis for flame-like color + sustained area over
+  time. Explicitly documented in code as "the least reliable heuristic in
+  the system."
+- Impact 0.75 (life-safety impact if real) but confidence capped at only
+  30/100 — the lowest cap of any heuristic, reflecting that color-based
+  fire detection has a genuinely high false-positive rate (any sustained
+  orange/red region can trigger it) and is never to be treated as
+  confirmed without a human looking at the actual footage.
+
+LINE-CROSSING
+- A configurable virtual line; tracks entry/exit direction as tracked
+  people cross it. Impact deliberately low (0.2) since a monitored line
+  sees routine foot traffic constantly and there's no "wrong direction"
+  policy layer yet (see Future Roadmap) — logged for analytics/audit,
+  not treated as inherently alarming.
+- Confidence 0.85 — this one is NOT capped low like the three above,
+  because it isn't inferring a fuzzy visual state; it's a straightforward
+  geometric crossing test on an already-reliable tracked position.
+
+CROWD THRESHOLD
+- A pure headcount off the same reliably-tracked person boxes: if the
+  number of currently-tracked people meets or exceeds a threshold
+  (default 5) and stays there for a sustained period (default 10 seconds),
+  it fires. Impact 0.45, confidence 0.9 — also NOT capped low, for the
+  same reason as line-crossing: counting things already reliably detected
+  isn't a fuzzy inference.
+- Deliberately global/whole-frame, not per-zone — there's no "expected
+  occupancy per zone" config concept yet (Future Roadmap).
+
+CAMERA HEALTH MONITORING
+- Offline: no frames received within OFFLINE_TIMEOUT_SECONDS (8s).
+- Frozen: frame-to-frame difference below FROZEN_DIFF_THRESHOLD (0.8) for
+  the entire FROZEN_WINDOW_SECONDS window (30s — deliberately long, since
+  a real, healthy CCTV view of an empty corridor is genuinely near-
+  motionless for long stretches; a short window would false-positive on
+  every quiet camera).
+- Blackout: mean brightness below BLACKOUT_BRIGHTNESS_THRESHOLD (12.0) AND
+  standard deviation below BLACKOUT_STD_THRESHOLD (6.0) — both brightness
+  AND textureless-ness, so a genuinely dark BUT detailed nighttime IR scene
+  doesn't get misread as "covered."
+- Blurred: Laplacian variance (edge sharpness) below BLUR_LAPLACIAN_
+  THRESHOLD, sustained across every sample in a 3-second window (a single
+  noisy frame — autofocus hunting, a blink of motion blur — must not flip
+  the status; a genuinely covered/defocused lens will still be caught
+  within that short window).
+    - This threshold (8.0) is intentionally NOT a universal constant — it's
+      camera- and lighting-dependent, overridable per deployment via env
+      var. It was recalibrated during development after discovering a
+      real consumer webcam sits around 13-14 raw variance even in sharp
+      focus (see Section 11) — a value tuned on one camera without
+      verifying against real hardware would have been wrong everywhere
+      else.
+- Auto-reconnect: on sustained read failure (not just a dark frame — an
+  actual failure to read from the capture device, which some camera
+  drivers exhibit under sustained near-total darkness), the system
+  releases and reopens the capture handle on a 5-second backoff, instead
+  of retrying forever on a broken handle that will never recover on its
+  own.
+- Design choice: OFFLINE/FROZEN/BLACKOUT are "hard anomalies" — normal
+  detection processing is skipped entirely, since there's no usable frame
+  content to detect anything in. BLURRED is treated differently — it's a
+  quality WARNING, not a "nothing to see" state, so person detection keeps
+  running through it (a blurry frame can still contain a detectable
+  person). This distinction was the direct fix for a real bug — see
+  Section 11.
+
+
+================================================================================
+7. DATA MODEL & LIFECYCLE
+================================================================================
+
+Observation (raw event row)
+  - camera_id, track_id (anonymous, camera-local), event_type, timestamp,
+    zone_id (nullable), confidence_score, impact_score, explanation,
+    raw_metadata (JSON: bbox/dwell time/etc — NEVER face data, by
+    construction), acknowledged/acknowledged_by/acknowledged_at.
+  - event_type is DB-CHECK-CONSTRAINED to a fixed enum (restricted_zone_
+    entry, after_hours_presence, loitering, camera_offline, camera_frozen,
+    camera_blackout, camera_blur, fall_warning, abandoned_object_warning,
+    fire_smoke_warning, line_crossing, crowd_threshold) — an invalid event
+    type can't even be written to the database, not just rejected by
+    application code.
+
+Incident (correlated group of observations)
+  - Created/extended by the Correlator when an Observation's impact_score
+    crosses 0.6. Deduped by (camera_id, event_type, 5-minute time bucket)
+    scoped to OPEN incidents only (new/acknowledged/investigating) — a
+    resolved incident's dedup hash can legitimately recur once a new
+    occurrence of the same rule fires later; that's correct behavior, not
+    a duplicate.
+  - impact_score / confidence_score / explanation are recomputed from ALL
+    currently-linked observations every time a new one is linked —
+    genuinely deterministic: the same set of linked observations always
+    produces the same three outputs, byte for byte.
+  - Lifecycle: new -> acknowledged -> investigating -> escalated ->
+    resolved, plus a human-set disposition (true_positive / false_positive
+    / uncertain) recorded only on resolution, never inferred automatically.
+
+EvidencePackage
+  - Linked to an Incident. clip_path (redacted, public), original_clip_
+    path (unredacted, role-gated), manifest_hash (SHA-256 of the clip),
+    signature (HMAC), ed25519_signature.
+
+AuditLog
+  - entry_hash, prev_hash (genesis row uses "0"), actor_id, action,
+    target_type/target_id, timestamp, payload (JSON of what changed).
+
+
+================================================================================
+8. SECURITY, PRIVACY & EVIDENCE-INTEGRITY DESIGN
+================================================================================
+
+- No face data is ever stored, in any table, at any point. Redaction uses
+  the ALREADY-COMPUTED YOLO person bounding boxes (with a margin), not a
+  separate face-detection pass — this was a direct design change after
+  early testing showed face-only detectors (Haar cascades) fail routinely
+  at CCTV-realistic oblique angles, distance, and resolution. Blurring the
+  whole detected person is both more reliable AND strictly more private
+  than a face-only approach that would sometimes miss the face and leave
+  someone identifiable anyway.
+- Track IDs are anonymous integers, assigned per-camera, per-session —
+  they carry no identity information and are never linked across cameras.
+- Every API route is behind JWT auth and an explicit `require_role(...)`
+  check — RBAC is enforced server-side on every request, not just hidden
+  in the UI (a responder hitting a start/stop endpoint directly, bypassing
+  the UI entirely, still gets a 403).
+- Redaction is on by default for the live stream and for exported evidence;
+  viewing the unredacted original requires an elevated role and is itself
+  written into the audit log.
+- The audit log's hash chain means the system's own history of who-did-
+  what is independently verifiable (GET /audit/verify walks the whole
+  chain and reports the first broken link, if any) — this is what makes
+  "we have logs" into "we can prove nobody tampered with the logs."
+
+
+================================================================================
+9. ROLES & ACCESS CONTROL
+================================================================================
+
+- admin: full control — camera/zone/schedule configuration, user-facing
+  administration, everything operator can do.
+- operator: start/stop cameras, acknowledge/escalate/resolve incidents,
+  package and view evidence (including unredacted originals).
+- responder: read-only camera/incident visibility (can see live feeds and
+  incidents, cannot start/stop cameras or change configuration) — added
+  specifically so a first-responder role can be looped in for situational
+  awareness without giving them control or destructive-action capability.
+
+Every one of these is enforced at the API layer via a `require_role(...)`
+FastAPI dependency on each route, not just conditional rendering in the
+frontend.
+
+
+================================================================================
+10. TESTING & QUALITY ASSURANCE
+================================================================================
+
+- 133 automated tests (pytest), covering: authentication, camera CRUD and
+  role-gated access, video-source lifecycle (including reconnect-on-
+  failure behavior), fall heuristic geometry, zone rules, schedule
+  evaluation, incident scoring math, evidence signing/verification, seed-
+  password behavior, and database-layer behavior.
+- 132 of 133 currently pass. The one failure
+  (test_private_key_is_not_world_readable) is a pre-existing, environment-
+  specific issue: it asserts a Unix file-permission mode (0o600) on the
+  Ed25519 private key file, which doesn't translate to Windows NTFS
+  permission semantics the same way — it's a test-environment mismatch, not
+  a functional defect in the signing code itself, and would need a
+  platform-aware assertion (or to be skipped on Windows) to resolve
+  correctly rather than just "fixed."
+- Development was driven by continuous live testing against a real webcam
+  and real recorded video files throughout, not just unit tests in
+  isolation — see Section 11 for concrete examples of bugs this caught
+  that unit tests alone would not have.
+
+
+================================================================================
+11. REAL BUGS FOUND AND FIXED DURING DEVELOPMENT
+================================================================================
+
+This section exists because "we tested it against a live camera and found
+real problems" is much stronger material for a judge panel than a system
+that has only ever run once in a demo. Every item below actually happened
+during this project's development, was diagnosed from first principles
+(logs, live testing, targeted instrumentation), and was fixed — not
+papered over.
+
+1. BLUR STATE WAS SILENTLY DISABLING ALL DETECTION
+   Early on, any camera-health anomaly (offline/frozen/blackout/BLUR) was
+   treated identically: skip all detection processing. In practice this
+   meant a slightly blurry (but still perfectly usable) webcam feed caused
+   the system to stop detecting people entirely — reported by a user as
+   "it's not detecting my face" when the real issue was the system
+   refusing to even LOOK because of a blur flag. Fix: split camera-health
+   states into "hard anomalies" (offline/frozen/blackout — genuinely no
+   usable frame) which skip processing, versus "blur" — a quality warning
+   that keeps detection running, since a blurry frame can still contain a
+   detectable person.
+
+2. BLUR THRESHOLD WAS MISCALIBRATED AGAINST REAL HARDWARE
+   The default blur (Laplacian variance) threshold was set assuming
+   "sharp" frames read in the hundreds. Live testing on a real consumer
+   webcam showed the RAW frame consistently reading around 13-14 even in
+   good focus — meaning the camera was permanently misclassified as
+   blurred. The first diagnosis attempt (adding sustained-window smoothing)
+   was a real improvement but not the actual fix. The real root cause was
+   found via temporary diagnostic logging: earlier manual testing had been
+   measuring the ANNOTATED frame (which has synthetic sharp overlay
+   graphics drawn on it) instead of the RAW camera frame, making the
+   camera look sharper than it actually was. Once measured correctly, the
+   threshold was recalibrated to 8.0 with clear margin, and documented as
+   camera-dependent rather than universal.
+
+3. A COVERED CAMERA STOPPED RESPONDING PERMANENTLY
+   Some camera/driver combinations, under sustained near-total darkness
+   (a covered lens), stop returning valid frames from the OS capture layer
+   entirely (not just dark frames — actual read failures). The original
+   reader loop kept calling .read() on the same broken capture handle
+   forever, with no recovery path even after the lens was uncovered. Fix:
+   detect sustained read failure and release + reopen the capture handle
+   on a 5-second backoff until it recovers.
+
+4. DEDUP_HASH UNIQUE CONSTRAINT CRASHED THE CORRELATOR
+   The Incident.dedup_hash column originally had a database-level UNIQUE
+   constraint. The correlator's own logic already correctly scoped
+   "duplicate" to OPEN incidents only — meaning the same hash legitimately
+   recurring after an earlier incident closed was expected, correct
+   behavior, which the blanket UNIQUE constraint didn't allow, causing a
+   crash on that exact common case. Fixed via an Alembic batch-mode
+   migration removing the DB-level constraint (SQLite requires a full
+   table rebuild to drop a constraint, since it can't ALTER one in place).
+
+5. A DATABASE CONCURRENCY BUG SURFACED ONLY UNDER HIGHER WRITE LOAD
+   SQLAlchemy's StaticPool (which forces a single shared connection across
+   all threads) was being applied unconditionally, including to the real
+   file-based production database — appropriate ONLY for `:memory:` SQLite,
+   where it's required. Under light write activity this went unnoticed;
+   once fire/smoke and line-crossing detection were added (increasing
+   write frequency from the detection pipeline's background thread
+   overlapping with HTTP request threads), it started producing "cannot
+   commit — no transaction is active" race errors. Fixed by restricting
+   StaticPool to in-memory URLs only.
+
+6. A COVERED CAMERA LOOKED LIKE "OFFLINE" IN THE UI EVEN THOUGH THE
+   BACKEND CORRECTLY SAID "BLACKOUT"
+   Verified via live testing (polling the live camera-status endpoint
+   continuously while physically covering the lens) that the backend
+   correctly and promptly classified the state as "blackout," never
+   "offline." The actual bug was in the frontend: the camera tile's
+   `showVideo` condition included active/frozen/blurred but NOT blackout,
+   so the tile fell back to the same generic "No signal" / WifiOff
+   placeholder used for a truly offline camera — visually indistinguishable
+   even though the badge text was technically correct. Fixed by including
+   blackout in the video-visible states, so a covered camera now shows its
+   actual (near-black) live feed instead of a generic offline placeholder.
+
+7. THE LIVE FEED WAS RUNNING AT ~4-6 FPS AND NOBODY HAD MEASURED WHY
+   Diagnosed with direct per-stage benchmarking rather than guessing:
+   measured on a real frame with 3 people detected, YOLO cost ~125ms and a
+   full MediaPipe pose-estimation model (run once per detected person, per
+   frame, purely to draw a "Standing"/"Analyzing..." text label) cost
+   another ~88ms — nearly 40% of total per-frame time — for output that
+   was verified, by exhaustive codebase search, to be used NOWHERE else
+   (not in fall detection, which is a separate real geometric heuristic;
+   not in scoring; not stored anywhere). Removed entirely, along with its
+   now-unused mediapipe dependency. Measured result after the fix: live
+   MJPEG delivery went from an estimated ~4-6fps ceiling to a measured
+   12.5fps, close to the stream's own 15fps cap.
+
+8. DEAD CODE FROM THE ORIGINAL PORT
+   Two modules (`enhanced_detector.py`, `person_tracker.py`) survived from
+   the original reference codebase this was built on top of but were never
+   actually imported anywhere in the live pipeline — confirmed by an
+   exhaustive reference search. Left as a known, disclosed housekeeping
+   item rather than silently ignored (see Limitations) — the honest answer
+   to "why is this file here" is "leftover from the initial port, verified
+   unused, safe to delete, just hasn't been."
+
+
+================================================================================
+12. KNOWN LIMITATIONS & HONEST SHORTCOMINGS
+================================================================================
+
+DETECTION ACCURACY
+- Fall, abandoned-object, and fire/smoke detection are classical CV
+  heuristics, not trained/validated classifiers. Their confidence is
+  deliberately capped low in the scoring system for exactly this reason —
+  expect real false positives and false negatives, by design, not by
+  oversight. Every one of them requires human verification before any
+  action is taken.
+- Fall detection needs a mostly front-on, full-body camera view; a close
+  or steep webcam-style angle will never trigger it (verified directly).
+- Abandoned-object detection needs ~300 frames for its background model to
+  converge, and fails to fire if a person remains near the object
+  (overlap suppression).
+- No low-light/IR tuning has been done; performance in poor lighting is
+  untested and likely degraded, especially for the color-based fire/smoke
+  heuristic.
+- No testing under adverse outdoor conditions (fog, rain, glare).
+- Simple centroid tracking can be confused by heavy occlusion (multiple
+  people fully overlapping) — no Kalman filtering or appearance-based
+  re-association, by design (see Section 5), but that is a real accuracy
+  tradeoff in dense-crowd scenes specifically.
+- No evaluation has been done for demographic/appearance bias in the
+  underlying YOLO person-detection model — this is a documented,
+  industry-wide open issue for object detection models generally, and this
+  project has not independently audited it.
+
+PERFORMANCE / SCALE
+- CPU-bound YOLO inference sets a real per-camera frame-rate ceiling
+  (~12-15fps measured on typical hardware after fixing the MediaPipe
+  bottleneck). One Python thread per camera does not scale cleanly to
+  dozens/hundreds of simultaneous cameras on one machine — that needs GPU
+  batching or a multi-node/edge architecture that isn't built yet.
+- SQLite is appropriate for a single-node deployment, not proven at
+  high-concurrency multi-node scale. The Postgres migration path exists via
+  SQLAlchemy but has not been load-tested.
+- No formal load/stress testing against many simultaneous camera streams.
+
+SECURITY / COMPLIANCE
+- No formal third-party penetration test or security audit has been
+  performed.
+- JWT-only auth — no SSO/LDAP/Active Directory integration yet for
+  enterprise deployment.
+- Evidence clips live on local disk, not redundant/replicated storage —
+  the cryptographic signing proves IF something was altered, but doesn't
+  protect against outright loss of the underlying storage (no backup
+  strategy built in yet).
+- No formal DPDP Act (India) or GDPR compliance certification. The
+  architecture is designed around the PRINCIPLES those laws care about
+  (no biometrics, redaction by default, full audit trail) but that is not
+  the same as a legal compliance review, which has not been done.
+- No adversarial-robustness evaluation of the YOLO model (e.g., resistance
+  to printed adversarial patterns) has been performed.
+
+PRODUCT SCOPE
+- No mobile app — web dashboard only.
+- Notifications currently go to Telegram only, not SMS/email/WhatsApp.
+- Crowd threshold and line-crossing are global/single-line, not yet
+  zone-aware with time-of-day policy layering.
+- No historical trend analytics or false-positive-rate tracking to help
+  operators tune thresholds over time — thresholds are static and
+  admin-configured only.
+- The access-control-system integration hook that scoring.py already
+  anticipates (`access_event_matched`) has no real subsystem behind it yet
+  — it's a deliberately-kept parameter, not a hidden gap, but it means
+  there's currently no way to automatically reduce a restricted-zone-entry
+  alert's severity based on a valid badge swipe, for example.
+
+HOUSEKEEPING
+- Two backend modules from the original ported codebase
+  (`enhanced_detector.py`, `person_tracker.py`) are dead code — verified
+  unused anywhere in the live pipeline, not yet deleted. Disclosed
+  honestly rather than hidden; harmless but should eventually be removed.
+
+
+================================================================================
+13. APPLICATION EXAMPLES
+================================================================================
+
+CIVILIAN / COMMERCIAL
+- Campuses & schools: restricted lab/server-room access, after-hours
+  presence near entrances, loitering detection.
+- Hospitals: fall detection in corridors/wards, restricted-zone alerts for
+  ICU/pharmacy storage areas.
+- Corporate offices: after-hours presence, zone-entry alerts for
+  server rooms/records storage.
+- Retail: loss-prevention-adjacent zone monitoring WITHOUT biometric
+  profiling of any shopper.
+- Warehouses/logistics: abandoned-object detection (spills/blockages),
+  fire/smoke early warning, restricted forklift-lane zones.
+- Construction sites: fall detection, restricted crane/excavation zone
+  entry.
+- Transit hubs/stations: crowd-threshold alerts, line-crossing at platform
+  edges, abandoned-object detection (unattended baggage).
+- Religious institutions / event venues: crowd-density monitoring during
+  large gatherings.
+
+GOVERNMENT / DEFENSE-ADJACENT (civilian-safe framing — no autonomous
+action, no biometrics, ever)
+- Cantonment/base perimeter monitoring: restricted-zone entry, line-
+  crossing at boundary fencing.
+- Sensitive-installation entry points: after-hours presence, loitering
+  near checkpoints.
+- Border-outpost auxiliary monitoring: camera-health monitoring itself is
+  valuable here — a border camera going dark or being tampered with is a
+  meaningful security event in its own right, independent of what's in
+  frame.
+- Air-gapped/on-prem deployment: no cloud dependency required; all data
+  and processing stay on local infrastructure, which matters directly for
+  data-sovereignty and classified/sensitive-site requirements.
+
+
+================================================================================
+14. COMPETITIVE LANDSCAPE & DIFFERENTIATION
+================================================================================
+
+Most existing "AI CCTV analytics" products fall into one of two camps:
+(a) they lead with facial recognition / biometric identity as the
+headline feature, carrying real privacy and legal exposure, or (b) they
+provide an opaque AI confidence score with no explanation of how it was
+reached, which is close to useless as defensible evidence in an actual
+incident review or legal context.
+
+EyeSpy's differentiation is the combination of three things most
+competitors don't do together:
+1. Every alert has a deterministic, human-readable explanation traceable
+   to one specific rule — not a black-box score.
+2. Confidence and impact are reported and capped SEPARATELY, so an
+   unreliable heuristic can never be mistaken for a certain detection.
+3. Evidence is cryptographically dual-signed and every operator action is
+   hash-chain audit-logged, so the system's own output and history can
+   both be independently verified, not just trusted on faith.
+
+None of this requires proprietary camera hardware — it works with
+whatever RTSP/USB cameras a site already owns, which lowers the switching
+cost versus a vendor-locked VMS platform considerably.
+
+
+================================================================================
+15. BUSINESS MODEL / MONETIZATION
+================================================================================
+
+- SaaS subscription, tiered by camera count and feature depth (basic
+  zone/behavior detection vs. full evidence-signing + audit suite).
+- On-premise/air-gapped licensing for government, defense, and regulated
+  industries (healthcare, finance) that cannot use cloud infrastructure.
+- Per-seat operator licensing for dashboard/console access beyond a base
+  camera tier.
+- Professional services: installation, zone/schedule configuration, and
+  camera-angle tuning (especially for the angle-sensitive fall heuristic).
+- Hardware bundling: a reference NVR/edge box + cameras + software as a
+  turnkey package for sites without existing CCTV.
+- White-label/integrator licensing: resold through existing security
+  system integrators who already own the customer relationships and
+  camera install base — likely the most realistic go-to-market path (see
+  Q&A).
+- Support & maintenance contracts (SLA-backed uptime, tuning updates).
+- API/integration licensing to plug into VMS platforms customers already
+  own, avoiding a camera-replacement requirement.
+
+
+================================================================================
+16. FUTURE ROADMAP
+================================================================================
+
+- Edge/GPU deployment (e.g. NVIDIA Jetson Orin) for real-time inference at
+  lower cost per camera, and to enable fully offline/air-gapped operation
+  at higher frame rates than CPU inference allows today.
+- Access-control-system integration, wiring a real subsystem behind the
+  `access_event_matched` hook already anticipated in the scoring engine
+  (e.g. suppressing a restricted-entry alert's severity when it correlates
+  with a valid badge swipe).
+- Per-zone, time-of-day-aware policies for crowd and line-crossing
+  thresholds, replacing the current global constants.
+- Multi-camera path correlation WITHOUT identity linking — e.g. timing-
+  based zone-to-zone handoff analytics that never require biometric
+  re-identification.
+- Cloud-native scaling: Kubernetes deployment, managed Postgres, redundant/
+  immutable (WORM) object storage for evidence clips.
+- SSO/LDAP/Active Directory integration and multi-tenancy, for enterprise
+  and MSSP (managed security service provider) resale.
+- Notification-channel expansion: SMS, WhatsApp Business API, email, push.
+- Analytics dashboard: incident heatmaps, trend reports, and false-
+  positive-rate tracking so operators can tune heuristic thresholds against
+  real data over time instead of static defaults.
+- Additional heuristics: PPE/safety-gear compliance for construction/
+  industrial sites, vehicle detection for parking/traffic use cases.
+- Low-light/IR camera tuning, and testing under adverse weather for
+  outdoor deployments.
+- Formal compliance work: DPDP Act alignment review, ISO 27001, third-
+  party penetration testing.
+- Model upgrade path: newer YOLO versions or domain-fine-tuned models as
+  they mature, without changing the surrounding deterministic-scoring
+  architecture — the scoring/explanation layer is intentionally decoupled
+  from the specific detector version in use.
+- Housekeeping: remove the two confirmed-dead legacy modules
+  (`enhanced_detector.py`, `person_tracker.py`).
+
+
+================================================================================
+17. EXTENSIVE Q&A BANK
+================================================================================
+
+--- ON THE CORE PHILOSOPHY ---
+
+Q: Why not use facial recognition — wouldn't that make it more useful?
+A: Deliberately and permanently excluded. It creates real privacy,
+consent, and legal exposure (increasingly restricted globally, including
+under India's DPDP Act), and most real security needs don't actually
+require knowing WHO someone is — they require knowing THAT someone is
+somewhere they shouldn't be, or doing something unsafe. Anonymous,
+camera-local tracking achieves the actual security goal without that
+liability.
+
+Q: Isn't "no facial recognition" a limitation, not a feature? Competitors
+can identify repeat offenders.
+A: It's a deliberate boundary, not a missing feature we ran out of time
+for. Identity tracking is exactly the part of "AI surveillance" facing the
+most legal and public pushback right now — building around behavior
+instead of identity is what makes this deployable somewhere a
+facial-recognition system would get rejected or banned outright, which is
+a real commercial and ethical advantage, not a gap.
+
+Q: What if the system misses an actual fall or fire?
+A: Any single detector, human or automated, can miss something — that's
+true of any monitoring system. What EyeSpy adds on top of passive human
+monitoring is a system watching continuously without attention fatigue,
+that never gets tired or distracted, running heuristics tuned to reduce
+that risk. It's explicitly not sold or positioned as a guaranteed replacement
+for human judgment — it's a decision-support layer that surfaces things a
+distracted human might miss, while always keeping a human in the loop for
+the final call.
+
+--- ON ACCURACY / RELIABILITY ---
+
+Q: How accurate is the system overall?
+A: Person detection itself (YOLOv8n) is a well-validated, heavily
+benchmarked model. The behavior heuristics on top of it (fall, abandoned
+object, fire/smoke) are classical computer vision, not trained
+classifiers, and the system says so explicitly to its own operators —
+their confidence scores are hard-capped low, and every alert from them
+requires human verification. We'd rather state that boundary clearly than
+claim an accuracy number we can't back up with a proper validation study.
+
+Q: What's your false-positive rate?
+A: We don't have a formal measured false-positive rate from a large
+labeled dataset — that's honestly a gap, and it's why every heuristic
+output is explicitly capped at low confidence and routed to a human,
+rather than presented as something to trust and act on automatically.
+Building that measurement (via the false_positive/true_positive
+disposition operators already record on resolution) into a tuning
+feedback loop is on the roadmap.
+
+Q: How do you handle multiple people or crowds?
+A: The centroid tracker handles moderate density well; heavy occlusion
+(people fully overlapping) can confuse a simple centroid-based tracker,
+which is a known tradeoff of choosing that approach over a heavier
+Kalman-filter/appearance-based tracker (see the tracking design rationale).
+Headcount for crowd detection itself is reliable, since it's just counting
+already-detected boxes, not a fuzzy inference.
+
+Q: Can it work at night or in low light?
+A: Not specifically tuned for it yet — this is an honest, disclosed
+limitation. IR-camera support and low-light tuning are explicit future
+work, not something claimed to work today.
+
+Q: What about outdoor cameras in fog, rain, or glare?
+A: Untested. This would likely degrade the color-based fire/smoke
+heuristic and the blackout/blur camera-health checks in particular, and is
+disclosed as future testing work rather than a validated capability today.
+
+--- ON PRIVACY / ETHICS / COMPLIANCE ---
+
+Q: Is this GDPR/DPDP Act compliant?
+A: It's architected around the principles those laws care about — no
+biometric collection, redaction by default, a full audit trail of who
+accessed what — but it has not gone through a formal legal compliance
+review or certification. That's future work, not a compliance claim being
+made today.
+
+Q: What stops an operator from misusing the system — viewing footage they
+shouldn't?
+A: Role-based access control enforced at the API layer (not just hidden in
+the UI), and every access to unredacted evidence is written into the
+hash-chained audit log — if someone tried to edit that log afterward to
+hide what they did, the hash chain breaks and it's independently
+detectable via the verify endpoint.
+
+Q: Has the system been security-audited or penetration-tested?
+A: No, and we say so directly — that's a real, disclosed gap for anyone
+considering a production or sensitive deployment, and formal third-party
+security review is explicit future work before any sensitive rollout.
+
+Q: How long is evidence retained, and can someone request deletion (right
+to erasure)?
+A: There's no automatic retention/deletion policy built in yet — evidence
+persists on local disk until manually removed. This is a real gap worth
+having an honest answer for: a formal retention policy, and reconciling a
+"right to erasure" request against the tamper-evident AUDIT LOG (which by
+design should NOT be alterable) versus the underlying EVIDENCE CLIPS
+(which reasonably could be deleted on a schedule or on request) is
+explicit future work, not solved today.
+
+Q: Could the YOLO model have demographic bias in who it detects?
+A: This is a well-documented, industry-wide open question for object
+detection models generally, and this project has not independently
+audited it for this specific model. Worth being upfront about rather than
+asserting fairness without having actually measured it.
+
+--- ON ARCHITECTURE / TECHNICAL CHOICES ---
+
+Q: Why Python/FastAPI instead of a lower-level language for the real-time
+video processing?
+A: The real-time-critical part (YOLO inference) already runs through
+PyTorch's compiled/optimized backend regardless of the surrounding
+language — the orchestration layer (reading frames, running heuristics,
+writing to a database, serving an API) isn't the bottleneck, so Python's
+development speed and library ecosystem (OpenCV, Ultralytics, FastAPI, all
+first-class in Python) was the right tradeoff, not a performance
+compromise in the part that actually matters for speed.
+
+Q: Why threads per camera instead of async or multiprocessing?
+A: Each camera's reader loop and detection loop are genuinely blocking,
+CPU/IO-heavy work (cv2 capture reads, YOLO inference) — async coroutines
+don't help with CPU-bound work without offloading to a thread/process pool
+anyway, and Python threads were sufficient at the target scale (a handful
+of cameras) without the added complexity of inter-process communication
+that a multiprocessing approach would need for shared state like the
+tracker and health monitor. Multiprocessing/GPU batching is the right
+answer at a much larger camera count — see Future Roadmap.
+
+Q: Why SQLite instead of Postgres/MySQL from the start?
+A: Zero setup for the target deployment size (one building, one small
+server, a handful to a few dozen cameras) — no separate database server
+to install, run, and secure. Because the whole data layer goes through
+SQLAlchemy, moving to Postgres for a larger deployment is a connection-
+string change, not a rewrite; that migration path exists by construction
+even though it hasn't been load-tested at scale yet.
+
+Q: Why not use a proper multi-object tracker like DeepSORT?
+A: DeepSORT-class trackers solve a harder problem than this system
+actually has — surviving long occlusion and re-identifying a track after
+it's lost, which requires an appearance-embedding model on top of
+detection. This system deliberately does NOT want tracks to survive
+loss-and-reacquisition, because that starts to resemble identity tracking,
+which conflicts with the "anonymous, camera-local-only" design principle.
+A simple nearest-centroid tracker does the actual needed job — count and
+distinguish currently-visible people — with far less compute and a track
+ID that's trivially provable as meaningless outside the current moment.
+
+Q: Why classical CV heuristics instead of training your own fall/fire/
+abandoned-object detection models?
+A: Training a reliable model for any of these needs a large, well-labeled,
+situation-realistic dataset that doesn't exist off-the-shelf in sufficient
+quantity or quality, and collecting/labeling one is a project of its own.
+Classical CV requires zero training data, is fully deterministic, and —
+critically, since every one of these three is explicitly "flag for human
+review," never "trust automatically" — its failure modes are
+understandable by a human ("the bounding box went wide and flat"), unlike
+a neural network's internal decision. The honestly-worse raw accuracy
+versus an eventual trained model is exactly why their confidence is capped
+low in scoring, rather than presented as equally trustworthy to person
+detection itself.
+
+Q: Why MJPEG instead of WebRTC for the live video feed?
+A: WebRTC solves sub-second two-way call latency via signaling/ICE/SDP
+negotiation — complexity this project doesn't need for one-way, dashboard-
+side monitoring, where an extra 100-300ms of latency is a non-issue. MJPEG
+is a single long-lived HTTP response of JPEG frames — the entire client
+implementation is one `<img>` tag, with the browser handling reconnection
+natively on drop.
+
+Q: Why both a WebSocket AND polling for live dashboard updates, isn't that
+redundant?
+A: They cover each other's failure mode. A dropped or missed WebSocket
+message means the UI would silently go stale forever with no self-
+correction if that were the only mechanism. The 8-second poll guarantees
+the dashboard is never more than 8 seconds stale even if a push event is
+missed, while the WebSocket gives near-instant updates the rest of the
+time — a small redundancy cost for a real reliability guarantee.
+
+Q: Why Ed25519 in addition to HMAC — why not just pick one signature
+scheme?
+A: They prove different things to different audiences. HMAC (a shared
+secret) proves internal authenticity to anyone holding that secret — us.
+Ed25519 (public-key) proves the same authenticity to a third party — a
+court, an external auditor — who only has the PUBLIC key and never had
+access to the shared secret used internally. Relying on HMAC alone would
+mean handing an external verifier the same secret used to sign everything
+else, which would also let them forge new "signed" evidence.
+
+Q: Why a hash-chained log instead of a blockchain for the audit trail?
+A: Nothing here needs decentralized consensus or multiple untrusted
+parties agreeing on order — it's a single organization's chain of custody.
+A straightforward hash chain (each row's hash includes the previous row's
+hash) gives the same tamper-evidence property — any edit to a past row
+breaks every hash after it — without the operational cost, complexity, and
+overhead a blockchain would add for zero corresponding benefit at this
+scale.
+
+Q: Why shadcn/ui instead of a standard component library like Material UI?
+A: shadcn generates actual component source directly into the project
+rather than being installed as an opaque dependency, built on unstyled,
+accessibility-solved Radix primitives underneath. That gave full control
+to restyle and extend components (e.g. adding new Badge variants for
+camera-health states) without fighting a library's theming API or waiting
+on an upstream release for a small change.
+
+--- ON BUSINESS / DIFFERENTIATION ---
+
+Q: How is this different from existing CCTV/VMS analytics products?
+A: Most competitors either lead with facial recognition (privacy/legal
+exposure) or provide an opaque AI score with no explanation (useless as
+defensible evidence). EyeSpy's combination of deterministic, rule-
+traceable explanations, separated confidence/impact scoring, and
+cryptographically-verifiable evidence and audit trails is not something
+most existing products do together.
+
+Q: What's the cost of deploying this?
+A: Designed to work with a site's EXISTING CCTV/RTSP cameras and
+commodity server hardware — no proprietary camera hardware required — and
+the entire stack is open-source technology (Python/FastAPI/React/YOLO),
+which keeps licensing cost far lower than a vendor-locked VMS platform.
+
+Q: How do you scale to hundreds of cameras?
+A: Honestly, not yet — today it's one CPU-bound processing thread per
+camera, which is fine for a building or small campus but would need GPU
+batching or an edge-node architecture to scale to a large multi-site
+deployment. That's explicit, disclosed future work, not solved today.
+
+Q: Who's the competition, and why would a customer switch?
+A: Existing CCTV/VMS analytics vendors, both international and Indian
+security-tech players, generally either add facial recognition (privacy/
+legal liability) or offer opaque AI scoring with no evidence-integrity
+guarantee. The pitch to a security-conscious buyer — a campus, hospital,
+or government facility — is: the same detection value, none of the
+biometric liability, and evidence that's actually defensible in a review
+or legal context because it's cryptographically signed and audit-logged.
+
+Q: What's the actual go-to-market plan?
+A: Most realistically, through existing security-system integrators who
+already have camera-install relationships with target customers (campuses,
+hospitals, offices) — selling the software intelligence layer on top of
+hardware they're already installing, rather than competing to replace
+cameras outright.
+
+Q: Is there IP here, or is this just gluing together open-source
+components?
+A: The individual building blocks (YOLO, FastAPI, React) are open source —
+the actual value and engineering is in the system design around them: the
+deterministic scoring/explanation layer that turns raw detections into
+defensible, explainable incidents; the confidence/impact separation
+principle applied consistently across every heuristic; and the dual-
+signing + hash-chain evidence architecture. That system-level design, not
+any single component, is what's differentiated.
+
+--- ON THE DEMO / IMPLEMENTATION ITSELF ---
+
+Q: Is this actually working, or is it a mockup?
+A: Fully working end-to-end against a real webcam and recorded video
+files: live detection, live MJPEG streaming, incident creation and
+scoring, evidence packaging with real cryptographic signatures, and a real
+hash-chained audit log — all backed by 133 automated tests (132 passing).
+Section 11 of this document lists real bugs found and fixed via live
+testing during development, which is direct evidence this has actually
+been run and stressed, not just built once and left untouched.
+
+Q: What's the current test coverage?
+A: 133 automated tests across authentication, RBAC, camera lifecycle
+(including reconnect-on-failure), fall-heuristic geometry, zone rules,
+schedule evaluation, incident-scoring math, and evidence signing/
+verification. 132 pass; the one failure is a Windows-vs-Unix file-
+permission semantics mismatch in a test, not a functional defect.
+
+Q: What happens if the camera disconnects or the network drops?
+A: The VideoSource layer detects sustained read failure and automatically
+attempts to reconnect on a backoff, rather than retrying forever on a
+broken handle. This was a real bug found and fixed during development —
+see Section 11.
+
+Q: Can I see the code / is it open source?
+A: Yes — it's version-controlled and can be reviewed directly; happy to
+walk through any specific module.
+
+Q: What database and hosting does the demo use?
+A: SQLite for the database (single file, zero setup), running the FastAPI
+backend and a Vite-served React frontend locally — no cloud dependency
+required to run the entire system end-to-end, which also directly
+supports the air-gapped/on-prem deployment story for government/defense
+contexts.
+
+
+================================================================================
+18. QUICK-REFERENCE CHEAT SHEET
+================================================================================
+
+KEY THRESHOLDS / NUMBERS
+- Person detection confidence threshold: 0.5
+- Loitering threshold: 120s default (per-zone override supported)
+- Fall confidence cap: 55/100 | impact: 0.65
+- Abandoned-object confidence cap: 50/100 | impact: 0.35
+- Fire/smoke confidence cap: 30/100 (lowest — least reliable) | impact: 0.75
+- Line-crossing confidence: 0.85 (not capped) | impact: 0.2
+- Crowd-threshold confidence: 0.9 (not capped) | impact: 0.45
+  - Crowd count threshold: 5 people, sustained 10s
+- Restricted-zone-entry impact: 0.9 | After-hours impact: 0.7
+- Auto-incident creation threshold: impact_score >= 0.6
+- Incident dedup window: 5 minutes (per camera + event type, open
+  incidents only)
+- Camera offline timeout: 8s | Frozen window: 30s (diff threshold 0.8)
+- Blackout: brightness < 12.0 AND stddev < 6.0
+- Blur: Laplacian variance < 8.0, sustained across a 3s window
+- Camera reconnect backoff: 5s
+- Tracker: max 120px jump to match, drop track after 50 missed frames
+
+ROLES: admin (full control) / operator (run + triage) / responder
+(read-only)
+
+TEST SUITE: 133 tests, 132 passing (1 pre-existing Windows file-permission
+semantics mismatch, unrelated to functionality)
+
+DEMO CREDENTIALS (development only — change before any real deployment):
+  admin / admin123
+  operator / op123
+  responder / resp123
+
+KEY FILES (backend)
+  backend/pipeline/detection_pipeline.py   - the main per-camera loop
+  backend/pipeline/video_source.py         - camera reader + health/reconnect
+  backend/detection/*.py                   - each standalone heuristic
+  backend/incidents/scoring.py             - deterministic impact/confidence math
+  backend/incidents/explain.py             - deterministic explanation templates
+  backend/incidents/correlator.py          - dedup + incident creation
+  backend/evidence/                        - redaction, signing, packaging
+  backend/audit/chain.py                   - hash-chained audit log
+  backend/db/models.py                     - full schema (with CHECK constraints)
+
+KEY FILES (frontend)
+  frontend/src/pages/Dashboard.tsx         - live camera + incident view
+  frontend/src/components/CameraTile.tsx   - per-camera video/status tile
+  frontend/src/lib/theme.tsx               - light/dark theme provider
+  frontend/src/lib/ws.ts                   - WebSocket live-feed hook
+
+RUNNING IT LOCALLY (no Docker)
+  python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
+  .venv/Scripts/python -m uvicorn backend.main:app --reload   (port 8000)
+  cd frontend && npm install && npm run dev                    (port 5173)
+
+RUNNING TESTS
+  .venv/Scripts/python -m pytest tests/ -q
+
+================================================================================
+END OF DOCUMENT
+================================================================================

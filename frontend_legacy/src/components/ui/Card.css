@@ -1,0 +1,39 @@
+.card {
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  transition: var(--transition-normal);
+}
+
+.card-default {
+  background-color: var(--color-surface);
+  border: var(--border-width) solid var(--color-surface-border);
+  box-shadow: var(--shadow-md);
+}
+
+.card-glass {
+  background-color: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: var(--border-width) solid var(--glass-border);
+  box-shadow: var(--shadow-card);
+}
+
+.card-header {
+  padding: var(--spacing-6);
+  padding-bottom: var(--spacing-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+}
+
+.card-title {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-foreground);
+  margin: 0;
+}
+
+.card-content {
+  padding: var(--spacing-6);
+  padding-top: 0;
+}

@@ -1,0 +1,193 @@
+.incidents-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+}
+
+.incidents-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-4) var(--spacing-6);
+  border-bottom: var(--border-width) solid var(--color-surface-border);
+  background-color: var(--color-surface);
+}
+
+.incidents-header h1 {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  margin: 0;
+  color: var(--color-foreground);
+}
+
+.incidents-content {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  padding: var(--spacing-4);
+  gap: var(--spacing-4);
+}
+
+.observations-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+}
+
+.search-container {
+  flex-shrink: 0;
+}
+
+.camera-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  padding-right: var(--spacing-2);
+}
+
+.camera-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-3);
+  border: var(--border-width) solid var(--color-surface-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.camera-item:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.camera-item.selected {
+  border-color: var(--color-primary);
+  background-color: hsla(0, 85%, 18%, 0.1);
+}
+
+.camera-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+}
+
+.camera-name {
+  font-weight: var(--font-weight-medium);
+  font-size: var(--font-size-base);
+}
+
+.camera-id {
+  font-size: var(--font-size-xs);
+  color: var(--color-muted-foreground);
+}
+
+.observations-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.observations-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+}
+
+.observation-item {
+  border: var(--border-width) solid var(--color-surface-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-4);
+  background-color: hsla(220, 8%, 15%, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+}
+
+.observation-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  border-bottom: var(--border-width) solid hsla(220, 8%, 25%, 0.5);
+  padding-bottom: var(--spacing-2);
+}
+
+.observation-title {
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-lg);
+  color: var(--color-error);
+  margin: 0;
+}
+
+.observation-time {
+  font-size: var(--font-size-sm);
+  color: var(--color-muted-foreground);
+}
+
+.observation-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--spacing-3);
+  margin-top: var(--spacing-2);
+}
+
+.observation-field {
+  display: flex;
+  flex-direction: column;
+}
+
+.observation-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-muted-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.observation-value {
+  font-size: var(--font-size-sm);
+  color: var(--color-foreground);
+  font-weight: var(--font-weight-medium);
+}
+
+.observation-explanation {
+  margin-top: var(--spacing-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-foreground);
+  background: hsla(220, 8%, 10%, 0.5);
+  padding: var(--spacing-3);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--color-primary);
+}
+
+.media-placeholder {
+  margin-top: var(--spacing-4);
+  padding: var(--spacing-6);
+  border: 1px dashed var(--color-surface-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-2);
+  background-color: hsla(220, 8%, 10%, 0.3);
+}
+
+.media-placeholder p {
+  color: var(--color-muted-foreground);
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
